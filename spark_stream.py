@@ -96,3 +96,74 @@ def connect_to_kafka(spark_conn):
         logging.warning(f"kafka dataframe could not be created because: {e}")
 
     return spark_df
+
+
+def create_cassandra_connection():
+    try:
+        # connecting to the cassandra cluster
+        cluster = Cluster(['localhost'])
+
+        cas_session = cluster.connect()
+
+        return cas_session
+    except Exception as e:
+        logging.error(f"Could not create cassandra connection due to {e}")
+        return None
+
+
+# docker exec -it cassandra cqlsh -u cassandra -p cassandra localhost 9042
+# once you enter cassandra shell you can test our streming by viewing if keyspaces are created:
+# - describe spark_streams.created_users;
+# - select * from spark_streams.created_users;
+
+
+def create_selection_df_from_kafka(spark_df):
+    schema = StructType([
+        StructField("id", StringType(), False),
+        StructField("first_name", StringType(), False),
+        StructField("last_name", StringType(), False),
+        StructField("gender", StringType(), False),
+        StructField("address", StringType(), False),
+        StructField("post_code", StringType(), False),
+        StructField("email", StringType(), False),
+        StructField("username", StringType(), False),
+        StructField("registered_date", StringType(), False),
+        StructField("phone", StringType(), False),
+        StructField("picture", StringType(), False)
+    ])
+
+    sel = spark_df.selectExpr("CAST(value AS STRING)") \
+        .select(from_json(col('value'), schema).alias('data')).select("data.*")
+    print(sel)
+
+    return sel
+
+# testing giving a job for spark_worker
+# - spark-submit --master spark://spark-master:7077 spark_stream.py
+
+if __name__ == "__main__":
+    # create spark connection
+    spark_conn = create_spark_connection()
+
+    if spark_conn is not None:
+        # connect to kafka with spark connection
+        spark_df = connect_to_kafka(spark_conn)
+        if spark_df is None:
+            print("spark_df is None")
+        else:
+            selection_df = create_selection_df_from_kafka(spark_df)
+            session = create_cassandra_connection()
+
+            if session is not None:
+                create_keyspace(session)
+                create_table(session)
+
+                logging.info("Streaming is being started...")
+
+                streaming_query = (selection_df.writeStream.format("org.apache.spark.sql.cassandra")
+                                   .option('checkpointLocation', '/tmp/checkpoint')
+                                   .option('keyspace', 'spark_streams')
+                                   .option('table', 'created_users')
+                                   .start())
+
+                streaming_query.awaitTermination()
